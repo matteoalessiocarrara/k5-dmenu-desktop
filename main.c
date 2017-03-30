@@ -55,11 +55,11 @@ void find_files(char dirname[]) {
 				}
 				else {
 					for(ssize_t r; (r = read(fd, &buf, bufsize)) > 0;) {
-						short broken_bytes = 0;
+						/*short broken_bytes = 0;
 
-						for(; buf[r - 1 - broken_bytes] != '\n'; broken_bytes++);
+						for(; (buf[r - 1 - broken_bytes] != '\n') && (broken_bytes <r); broken_bytes++);
 						buf[r - broken_bytes] = '\0';
-						if(broken_bytes) lseek(fd, -broken_bytes, SEEK_CUR);
+						if(broken_bytes) lseek(fd, -broken_bytes, SEEK_CUR);*/
 						}
 
 					if(close(fd) == -1) fprintf(stderr, "'%s': %s", entry_path, strerror(errno));
