@@ -18,9 +18,9 @@
 #define die(...) {fprintf(stderr, __VA_ARGS__); exit(EXIT_FAILURE);}
 #define pstrcpy(dest, src) {dest = malloc(PATH_MAX); strcpy(dest, src);}
 
-regex_t rheader, rname;
+regex_t header_cr, name_cr;
 
-void find_files(char dirname[]) {
+void find_files(char dirname[], int out_names_fd, int out_files_fd) {
 	DIR *d;
 	struct dirent *entry;
 	struct stat entrys;
@@ -28,6 +28,13 @@ void find_files(char dirname[]) {
 	unsigned bufsize = 20000;
 	char *filebuf = malloc(bufsize + 1);
 	int fd;
+	size_t header_matches = 5;
+	regmatch_t *headers = malloc(sizeof(regmatch_t) * header_matches), *header = NULL;
+	unsigned short headers_found;
+	size_t max_names = 2;
+	regmatch_t *names = malloc(sizeof(regmatch_t) * max_names), *name = NULL;
+	unsigned short names_found;
+	unsigned name_len;
 
 	d = opendir(dirname);
 	if (d == NULL) {
@@ -35,11 +42,11 @@ void find_files(char dirname[]) {
 		return;
 	}
 
-	errno = 0;
 	while(1) {
+		errno = 0;
 		entry = readdir(d);
 		if (entry == NULL) {
-			if(errno != 0) perror(NULL);
+			if(errno != 0) perror(dirname);
 			break;
 		}
 
@@ -54,7 +61,7 @@ void find_files(char dirname[]) {
 
 		if (S_ISDIR(entrys.st_mode)) {
 			if ((strcmp(entry->d_name, ".") != 0) && (strcmp(entry->d_name, "..") != 0)) {
-				find_files(entry_path);
+				find_files(entry_path, out_names_fd, out_files_fd);
 			}
 		}
 		else if(strlen(entry->d_name) >= strlen(".desktop")) {
@@ -76,8 +83,96 @@ void find_files(char dirname[]) {
 					}
 					else {
 						filebuf[entrys.st_size] = '\0';
+
+						while(1) {
+							if (regexec(&header_cr, filebuf, header_matches, headers, 0) == REG_NOMATCH) {
+								fprintf(stderr, "%s: Could not find any header\n", entry_path);
+								goto close_desktop_file;
+							}
+							headers_found = 0;
+							for(register unsigned short i = 0; i < header_matches; i++) {
+								if(headers[i].rm_so != -1) {
+									headers_found++;
+									if(!strncmp(filebuf + headers[i].rm_so, "[Desktop Entry]", strlen("[Desktop Entry]")))
+										header = headers + i;
+								}
+							}
+							if (header == NULL) {
+								if(headers_found == header_matches) {
+									header_matches += 5;
+									headers = realloc(headers, sizeof(regmatch_t) * header_matches);
+									if (headers == NULL) die(strerror(errno));
+								}
+								else {
+									fprintf(stderr, "%s: Could not find `Desktop Entry` header\n", entry_path);
+									goto close_desktop_file;
+								}
+							}
+							else break;
+						}
+
+						// Find the 'Name' key
+						while(1) {
+							if(regexec(&name_cr, filebuf, max_names, names, 0) == REG_NOMATCH) {
+								fprintf(stderr, "%s: no 'Name' keys\n", entry_path);
+								goto close_desktop_file;
+							}
+
+							names_found = 0;
+							for(register unsigned short i = 0; i < max_names; i++)
+								if (names[i].rm_so != -1) names_found++;
+
+							if(headers_found == 1) {
+								if (names_found == 1)
+									name = names + 0;
+								else {
+									fprintf(stderr, "%s: Invalid syntax, found multiple `Name` keys ‎under the same header\n", entry_path);
+									goto close_desktop_file;
+								}
+							}
+							else {
+								if (names_found == 1) {
+									if (names[0].rm_so > header->rm_so) {
+										for(register unsigned short i = 0; i < headers_found; i++) {
+											if (headers + i != header) {
+												if((headers[i].rm_so > header->rm_so) && (name[0].rm_so > headers[i].rm_so)) {
+													fprintf(stderr, "%s: 'Name' key found but under incorrect header\n", entry_path);
+													goto close_desktop_file;
+												}
+											}
+										}
+										name = names + 0;
+									}
+								}
+								else {
+									// FIXME
+									fprintf(stderr, "Not implemented\n");
+								}
+							}
+
+							if (name == NULL) {
+								if (names_found == max_names) {
+									max_names += 4;
+									names = realloc(names, sizeof(regmatch_t) * max_names);
+									if (names == NULL) die(strerror(errno));
+								}
+								else {
+									fprintf(stderr, "%s: No valid 'Name' key found\n", entry_path);
+									goto close_desktop_file;
+								}
+
+							}
+							else break;
+						}
 					}
 
+					for(name_len = 0; (filebuf[name->rm_eo + name_len] != '\n') && (filebuf[name->rm_eo + name_len] != '\0'); name_len++);
+					write(out_names_fd, filebuf + name->rm_eo, name_len);
+					write(out_names_fd, "\n", 1);
+					write(out_files_fd, entry_path, strlen(entry_path));
+					write(out_files_fd, "\n", 1);
+
+close_desktop_file:
 					if(close(fd) == -1) perror(entry_path);
 				}
 			}
@@ -87,10 +182,12 @@ void find_files(char dirname[]) {
 	if (closedir(d) == -1) perror(dirname);
 	free(entry_path);
 	free(filebuf);
+	free(headers);
+	free(names);
 }
 
 int main () {
-	char **searchdirs, *xdg_data_dirs;
+	char **searchdirs, *xdg_data_dirs, *testdir;
 	short dirs;
 
 	searchdirs = malloc(sizeof(char*));
@@ -121,14 +218,14 @@ int main () {
 		}
 	}
 
-	if(regcomp(&rheader, "^\\[.*\\]$", 0) != 0) die("Regex error\n");
-	if(regcomp(&rname, "^Name *=", 0) != 0) die("Regex error\n");
+	if(regcomp(&header_cr, "^\\[.*\\]$", REG_NEWLINE) != 0) die("Regex compilation error\n");
+	if(regcomp(&name_cr, "^Name *= *", REG_NEWLINE) != 0) die("Regex compilation error\n");
 
+	testdir = malloc(PATH_MAX);
 	for(short i = 0; i < dirs; i++) {
-		char dir[PATH_MAX];
-		strcpy(dir, searchdirs[i]);
-		strcat(dir, "/applications");
-		find_files(dir);
+		strcpy(testdir, searchdirs[i]);
+		strcat(testdir, "/applications");
+		find_files(testdir, STDOUT_FILENO, STDERR_FILENO);
 	}
 
 	return 0;
