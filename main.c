@@ -1,32 +1,42 @@
 /* Copyright 2017 Matteo Alessio Carrara <sw.matteoac@gmail.com> */
 #define _DEFAULT_SOURCE
+#define _POSIX_C_SOURCE
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/types.h>
-#include <dirent.h>
 #include <errno.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <unistd.h>
 #include <limits.h>
 
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <dirent.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <regex.h>
+
 #define die(...) {fprintf(stderr, __VA_ARGS__); exit(EXIT_FAILURE);}
-#define mstrcpy(dest, src) {dest = malloc(strlen(src) + 1); strcpy(dest, src);}
+#define pstrcpy(dest, src) {dest = malloc(PATH_MAX); strcpy(dest, src);}
+
+regex_t rheader, rname;
 
 void find_files(char dirname[]) {
 	DIR *d;
+	struct dirent *entry;
+	struct stat entrys;
+	char *entry_path = malloc(PATH_MAX);
+	unsigned bufsize = 20000;
+	char *filebuf = malloc(bufsize + 1);
+	int fd;
 
 	d = opendir(dirname);
 	if (d == NULL) {
-		fprintf(stderr, "`%s`: %s\n", dirname, strerror(errno));
+		perror(dirname);
 		return;
 	}
 
-	for(errno = 0;;) {
-		struct dirent *entry;
-		char entry_path[PATH_MAX];
-
+	errno = 0;
+	while(1) {
 		entry = readdir(d);
 		if (entry == NULL) {
 			if(errno != 0) perror(NULL);
@@ -37,44 +47,52 @@ void find_files(char dirname[]) {
 		strcat(entry_path, "/");
 		strcat(entry_path, entry->d_name);
 
-		// warning: d_type is non-standard
-		if (entry->d_type & DT_DIR) {
+		if (stat(entry_path, &entrys) == -1) {
+			perror(entry_path);
+			break;
+		}
+
+		if (S_ISDIR(entrys.st_mode)) {
 			if ((strcmp(entry->d_name, ".") != 0) && (strcmp(entry->d_name, "..") != 0)) {
 				find_files(entry_path);
 			}
 		}
 		else if(strlen(entry->d_name) >= strlen(".desktop")) {
 			if (!strcmp(entry->d_name + (strlen(entry->d_name) - strlen(".desktop")), ".desktop")) {
-				const unsigned bufsize = 200;
-				char buf[bufsize + 1];
-				int fd;
-
 				fd = open(entry_path, O_RDONLY);
 				if (fd == -1) {
-					fprintf(stderr, "'%s': %s\n", entry_path, strerror(errno));
+					perror(entry_path);
 				}
 				else {
-					for(ssize_t r; (r = read(fd, &buf, bufsize)) > 0;) {
-						/*short broken_bytes = 0;
+					if(entrys.st_size > bufsize) {
+						bufsize = entrys.st_size;
+						filebuf = realloc(filebuf, bufsize + 1);
+						if (filebuf == NULL)
+							die("Memory allocation failed for bytes=%u: %s\n", bufsize + 1, strerror(errno));
+					}
 
-						for(; (buf[r - 1 - broken_bytes] != '\n') && (broken_bytes <r); broken_bytes++);
-						buf[r - broken_bytes] = '\0';
-						if(broken_bytes) lseek(fd, -broken_bytes, SEEK_CUR);*/
-						}
+					if(read(fd, filebuf, bufsize) == -1) {
+						perror(entry_path);
+					}
+					else {
+						filebuf[entrys.st_size] = '\0';
+					}
 
-					if(close(fd) == -1) fprintf(stderr, "'%s': %s", entry_path, strerror(errno));
+					if(close(fd) == -1) perror(entry_path);
 				}
 			}
 		}
 	}
 
-	if (closedir(d) == -1) fprintf(stderr, "`%s`: %s\n", dirname, strerror(errno));
+	if (closedir(d) == -1) perror(dirname);
+	free(entry_path);
+	free(filebuf);
 }
 
-int main (int argc, char **argv) {
+int main () {
 	char **searchdirs, *xdg_data_dirs;
 	short dirs;
-	
+
 	searchdirs = malloc(sizeof(char*));
 	dirs = 1;
 	searchdirs[0] = getenv("XDG_DATA_HOME");
@@ -88,20 +106,23 @@ int main (int argc, char **argv) {
 		strcpy(searchdirs[0], home);
 		strcat(searchdirs[0], "/.local/share");
 	}
-	
+
 	xdg_data_dirs = getenv("XDG_DATA_DIRS");
 	if (xdg_data_dirs == NULL) {
 		dirs += 2;
-		realloc(searchdirs, sizeof(char*) * dirs);
-		mstrcpy(searchdirs[1], "/usr/local/share/");
-		mstrcpy(searchdirs[2], "/usr/share");
+		searchdirs = realloc(searchdirs, sizeof(char*) * dirs);
+		pstrcpy(searchdirs[1], "/usr/local/share");
+		pstrcpy(searchdirs[2], "/usr/share");
 	} else {
 		for(char *tok = strtok(xdg_data_dirs, ":"); tok != NULL; tok = strtok(NULL, ":")) {
 			dirs++;
-			realloc(searchdirs, sizeof(char*) * dirs);
-			mstrcpy(searchdirs[dirs - 1], tok);
+			searchdirs = realloc(searchdirs, sizeof(char*) * dirs);
+			pstrcpy(searchdirs[dirs - 1], tok);
 		}
 	}
+
+	if(regcomp(&rheader, "^\\[.*\\]$", 0) != 0) die("Regex error\n");
+	if(regcomp(&rname, "^Name *=", 0) != 0) die("Regex error\n");
 
 	for(short i = 0; i < dirs; i++) {
 		char dir[PATH_MAX];
