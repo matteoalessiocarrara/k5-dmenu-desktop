@@ -1,4 +1,7 @@
 /* Copyright 2017 Matteo Alessio Carrara <sw.matteoac@gmail.com> */
+
+// TODO Cache
+
 #define _DEFAULT_SOURCE
 #define _POSIX_C_SOURCE
 
@@ -14,14 +17,17 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <regex.h>
 
 #define die(...) {fprintf(stderr, __VA_ARGS__); exit(EXIT_FAILURE);}
 
-// TODO Cache
-// TODO Avoid using regex
+struct desktop_file
+{
+		char path[PATH_MAX];
+		off_t size;
+};
 
-static void find_files(const char *scandir, off_t **fsize, char ***fpath, unsigned *fnum)
+// after the last execution, files can be realloc-ed to nfiles in order to free unnecessary memory
+void find_files(const char *scandir, struct desktop_file **files, unsigned *nfiles)
 {
 	DIR *d;
 	struct dirent *entry;
@@ -29,27 +35,29 @@ static void find_files(const char *scandir, off_t **fsize, char ***fpath, unsign
 	char *efullpath = malloc(PATH_MAX);
 
 	static unsigned out_bufsiz = 200;
-	static bool out_init = false;
+	static bool first_run = true;
 
-	// initialize output pointers
-	if(!out_init)
+	if (first_run)
 	{
-		out_init = true;
-		*fnum = 0;
-		*fsize = malloc(sizeof(off_t) * out_bufsiz);
-		*fpath = malloc(sizeof(char*) * out_bufsiz);
+		first_run = false;
+		*files = malloc(sizeof(struct desktop_file) * out_bufsiz);
+		*nfiles = 0;
 
-		if((*fsize == NULL) || (*fpath == NULL))
-			die(strerror(errno));
-
-		for(register unsigned i = 0; i < out_bufsiz; i++)
+		if(*files == NULL)
 		{
-			(*fpath)[i] = malloc(PATH_MAX);
-			if ((*fpath)[i] == NULL) die(strerror(errno));
+			fprintf(stderr, "Memory allocation error, cannot scan dir '%s': %s\n", scandir, strerror(errno));
+			return;
+		}
+	}
+	else
+	{
+		if(*files == NULL)
+		{
+			fprintf(stderr, "Invalid pointer, cannot scan dir '%s'\n", scandir);
+			return;
 		}
 	}
 
-	// function begin
 	d = opendir(scandir);
 	if (d == NULL)
 	{
@@ -64,9 +72,9 @@ ls_start:
 		entry = readdir(d);
 		if (entry == NULL)
 		{
-			if(errno == 0) // end of direcory
+			if(errno == 0)
 				break;
-			else // reading error
+			else
 			{
 				perror(scandir);
 				goto ls_start;
@@ -86,29 +94,30 @@ ls_start:
 		if (S_ISDIR(estat.st_mode))
 		{
 			if ((strcmp(entry->d_name, ".") != 0) && (strcmp(entry->d_name, "..") != 0))
-				find_files(efullpath, fsize, fpath, fnum);
+			{
+				find_files(efullpath, files, nfiles);
+			}
 		}
 		else if(strlen(entry->d_name) >= strlen(".desktop"))
 		{
 			if (!strcmp(entry->d_name + (strlen(entry->d_name) - strlen(".desktop")), ".desktop"))
 			{
-				(*fsize)[*fnum] = estat.st_size;
-				strcpy((*fpath)[*fnum], efullpath);
-				(*fnum)++;
-				if (*fnum == out_bufsiz)
+				(*files)[*nfiles].size = estat.st_size;
+				strcpy((*files)[*nfiles].path, efullpath);
+				(*nfiles)++;
+
+				if (*nfiles == out_bufsiz)
 				{
+					struct desktop_file *tmp;
 					out_bufsiz += 200;
-					*fsize = realloc(*fsize, sizeof(off_t) * out_bufsiz);
-					*fpath = realloc(*fpath, sizeof(char*) * out_bufsiz);
+					tmp = realloc(*files, sizeof(struct desktop_file) * out_bufsiz);
 
-					if((*fsize == NULL) || (*fpath == NULL))
-						die(strerror(errno));
-
-					for(register unsigned i = (*fnum) - 1; i < out_bufsiz; i++)
+					if(tmp == NULL)
 					{
-						(*fpath)[i] = malloc(PATH_MAX);
-						if ((*fpath)[i] == NULL) die(strerror(errno));
+						fprintf(stderr, "Memory allocation error, cannot scan dir '%s': %s\n", scandir, strerror(errno));
+						return;
 					}
+					else *files = tmp;
 				}
 			}
 		}
@@ -120,38 +129,49 @@ ls_start:
 
 int main ()
 {
-	char **searchdirs, *xdg_data_dirs, *home, *testdir;
+	char **searchdirs, *xdg_data_dirs, *home;
 	short ndirs;
-	char **files;
-	off_t *fsize;
+
+	char testdir[PATH_MAX];
+	struct desktop_file *file;
 	unsigned files_found;
-	regex_t header_cr, name_cr;
-	unsigned fbufsize = 20000;
-	char *fbuf = malloc(fbufsize + 1);
+
+	short fbufsize;
+	char *fbuf;
+	char *fbuftmp;
 	int fd;
-	short headers_max = 5;
-	regmatch_t *headers = malloc(sizeof(regmatch_t) * headers_max);
-	regmatch_t *header;
-	short headers_found;
-	short max_names = 2;
-	regmatch_t *names = malloc(sizeof(regmatch_t) * max_names);
-	regmatch_t *name;
-	unsigned short names_found;
+
+	char **oth_headers = NULL;
+	short oth_headers_found;
+	char *header;
+
+	char **name_keys = NULL;
+	char **names_start = NULL;
+	short names_found;
+	short name_idx;
+
 	unsigned name_len;
 
-	// get paths
+	// find paths where to search for .desktop files
 
 	ndirs = 1;
 	searchdirs = malloc(sizeof(char*) * ndirs);
-	searchdirs[0] = getenv("XDG_DATA_HOME");
-	if (searchdirs[0] == NULL)
+	searchdirs[ndirs - 1] = getenv("XDG_DATA_HOME");
+	if (searchdirs[ndirs - 1] == NULL)
 	{
 		home = getenv("HOME");
-		if (home == NULL) die("Err: Neither $XDG_DATA_HOME nor $HOME are set\n");
-
-		searchdirs[0] = malloc(PATH_MAX);
-		strcpy(searchdirs[0], home);
-		strcat(searchdirs[0], "/.local/share");
+		if (home == NULL)
+		{
+			fprintf(stderr, "Warning: Neither $XDG_DATA_HOME nor $HOME are set\n");
+			free(searchdirs[ndirs - 1]);
+			ndirs--;
+		}
+		else
+		{
+			searchdirs[ndirs - 1] = malloc(PATH_MAX);
+			strcpy(searchdirs[ndirs - 1], home);
+			strcat(searchdirs[ndirs - 1], "/.local/share");
+		}
 	}
 
 	xdg_data_dirs = getenv("XDG_DATA_DIRS");
@@ -159,8 +179,8 @@ int main ()
 	{
 		ndirs += 2;
 		searchdirs = realloc(searchdirs, sizeof(char*) * ndirs);
-		searchdirs[1] = "/usr/local/share";
-		searchdirs[2] = "/usr/share";
+		searchdirs[ndirs - 2] = "/usr/local/share";
+		searchdirs[ndirs - 1] = "/usr/share";
 	}
 	else
 	{
@@ -174,164 +194,242 @@ int main ()
 		}
 	}
 
-	// find .desktop files
-
-	testdir = malloc(PATH_MAX);
 	for(short i = 0; i < ndirs; i++)
 	{
 		strcpy(testdir, searchdirs[i]);
 		strcat(testdir, "/applications");
-		find_files(testdir, &fsize, &files, &files_found);
+		find_files(testdir, &file, &files_found);
 	}
-
-	// compile regex
-
-	if(regcomp(&header_cr, "^\\[.*\\]$", REG_NEWLINE) != 0) die("Regex compilation error\n");
-	if(regcomp(&name_cr, "^Name *= *", REG_NEWLINE) != 0) die("Regex compilation error\n");
+	file = realloc(file, sizeof(struct desktop_file) * files_found);
 
 	// print application names
 
-	for(unsigned fn = 0; fn < files_found; fn++)
+	fbufsize = 20000;
+	fbuf = malloc(fbufsize + 1);
+	for(unsigned n = 0; n < files_found; n++)
 	{
-
-		fd = open(files[fn], O_RDONLY);
+		fd = open(file[n].path, O_RDONLY);
 		if (fd == -1)
 		{
-			perror(files[fn]);
+			perror(file[n].path);
 			goto next_file;
 		}
 
-		if(fsize[fn] > fbufsize)
+		if(file[n].size > fbufsize)
 		{
-			fbufsize = fsize[fn];
-			fbuf = realloc(fbuf, fbufsize + 1);
-			if (fbuf == NULL)
-				die("Memory allocation failed for bytes=%u: %s\n", fbufsize + 1, strerror(errno));
+			fbuftmp = realloc(fbuf, file[n].size + 1);
+
+			if (fbuftmp == NULL)
+			{
+				fprintf(stderr, "%s: cannot process: %s\n", file[n].path, strerror(errno));
+				goto next_file;
+			}
+			else
+			{
+				fbufsize = file[n].size;
+				fbuf = fbuftmp;
+			}
 		}
 
 		if(read(fd, fbuf, fbufsize) == -1)
 		{
-			perror(files[fn]);
+			perror(file[n].path);
 			goto next_file;
 		}
 
-		fbuf[fsize[fn]] = '\0';
+		fbuf[file[n].size] = '\0';
 
-		// Find the 'Desktop Entry' header
-		while(1)
+		// find the 'Desktop Entry' header
+
+		oth_headers = NULL;
+		oth_headers_found = 0;
+		header = NULL;
+		for(unsigned i = 0; fbuf[i] != '\0'; i++)
 		{
-			if (regexec(&header_cr, fbuf, headers_max, headers, 0) == REG_NOMATCH)
+			if(fbuf[i] == '[')
 			{
-				fprintf(stderr, "%s: Could not find any header\n", files[fn]);
-				goto close_desktop_file;
-			}
+				if(i > 0)
+					if(fbuf[i - 1] != '\n')
+						goto not_an_header;
 
-			header = NULL;
-			headers_found = 0;
-			for(short i = 0; i < headers_max; i++)
-			{
-				if(headers[i].rm_so != -1)
+				if(!strncmp(fbuf + i, "[Desktop Entry]", strlen("[Desktop Entry]")))
 				{
-					headers_found++;
-					if(!strncmp(fbuf + headers[i].rm_so, "[Desktop Entry]", strlen("[Desktop Entry]")))
-						header = headers + i;
-				}
-			}
-
-			if (header == NULL)
-			{
-				if(headers_found == headers_max)
-				{
-					headers_max += 5;
-					headers = realloc(headers, sizeof(regmatch_t) * headers_max);
-					if (headers == NULL) die(strerror(errno));
+					if(header == NULL)
+						header = fbuf + i;
+					else
+					{
+						fprintf(stderr, "%s: Duplicate 'Desktop Entry' header found\n", file[n].path);
+						goto close_desktop_file;
+					}
 				}
 				else
 				{
-					fprintf(stderr, "%s: Could not find `Desktop Entry` header\n", files[fn]);
+					oth_headers_found++;
+					oth_headers = realloc(oth_headers, sizeof(char*) * oth_headers_found);
+					oth_headers[oth_headers_found - 1] = fbuf + i;
+				}
+			}
+not_an_header:;
+		}
+
+		if(header == NULL)
+		{
+			if (oth_headers_found == 0)
+				fprintf(stderr, "%s: No headers found\n", file[n].path);
+			else
+				fprintf(stderr, "%s: Cannot find the `Desktop Entry` header\n", file[n].path);
+
+			goto close_desktop_file;
+		}
+
+		// find the 'Name' key
+
+		name_keys = NULL;
+		names_start = NULL;
+		names_found = 0;
+		name_idx = -1;
+		for(unsigned i = 0; i < (file[n].size - strlen("Name=")); i++)
+		{
+			if (fbuf[i] == 'N')
+			{
+				if(i > 0)
+				{
+					if(fbuf[i - 1] != '\n')
+						goto not_a_name;
+				}
+
+				if(!strncmp(fbuf + i, "Name", strlen("Name")))
+				{
+					for(unsigned j = i + strlen("Name"); fbuf[j] != '\0'; j++)
+					{
+						if((fbuf[j] != ' ') && (fbuf[j] != '='))
+							goto not_a_name;
+
+						if (fbuf[j] == '=')
+						{
+							names_found++;
+							name_keys = realloc(name_keys, sizeof(char*) * names_found);
+							names_start = realloc(names_start, sizeof(char*) * names_found);
+
+							name_keys[names_found - 1] = fbuf + i;
+							names_start[names_found - 1] = fbuf + j + 1;
+
+							i = j + 1;
+							while(1)
+							{
+								if((fbuf[i] == '\n') || (fbuf[i] == '\0'))
+									break;
+								i++;
+							}
+
+							break;
+						}
+					}
+				}
+			}
+not_a_name:;
+		}
+
+		if (names_found == 0)
+		{
+			fprintf(stderr, "%s: no 'Name' keys\n", file[n].path);
+			goto close_desktop_file;
+		}
+
+		// if we are here we found the header and at least one 'Name' key
+
+		if(oth_headers_found == 0)
+		{
+			if (names_found == 1)
+			{
+				if(name_keys[0] > header)
+				{
+					name_idx = 0;
+				}
+				else
+				{
+					fprintf(stderr, "%s: 'Name' key found but incorrect position\n", file[n].path);
 					goto close_desktop_file;
 				}
 			}
-			else break;
-		}
-
-		// Find the 'Name' key
-		while(1)
-		{
-			if(regexec(&name_cr, fbuf, max_names, names, 0) == REG_NOMATCH)
-			{
-				fprintf(stderr, "%s: no 'Name' keys\n", files[fn]);
-				goto close_desktop_file;
-			}
-
-			names_found = 0;
-			for(short i = 0; i < max_names; i++)
-				if (names[i].rm_so != -1) names_found++;
-
-			if (names_found == max_names)
-			{
-				max_names += 4;
-				names = realloc(names, sizeof(regmatch_t) * max_names);
-				if (names == NULL) die(strerror(errno));
-			}
-			else break;
-		}
-
-		// If we are here we found the header and at least one 'Name' key
-		if(headers_found == 1)
-		{
-			if (names_found == 1)
-				name = names + 0;
 			else
 			{
-				fprintf(stderr, "%s: Invalid syntax, found multiple `Name` keys ‎under the same header\n", files[fn]);
+				fprintf(stderr, "%s: Invalid syntax, found multiple `Name` keys ‎under the same header\n", file[n].path);
 				goto close_desktop_file;
 			}
 		}
-		else if(headers_found > 1)
+		else
 		{
 			if (names_found == 1)
 			{
-				if (names[0].rm_so > header->rm_so)
+				if (name_keys[0] > header)
 				{
-					// Verify that the key is under the correct header
-					for(short i = 0; i < headers_found; i++)
+					// verify that the key is under the correct header
+
+					for(short i = 0; i < oth_headers_found; i++)
 					{
-						if ((headers + i) != header)
+						if((oth_headers[i] > header) && (name_keys[0] > oth_headers[i]))
 						{
-							if((headers[i].rm_so > header->rm_so) && (name[0].rm_so > headers[i].rm_so))
-							{
-								fprintf(stderr, "%s: 'Name' key found but under incorrect header\n", files[fn]);
-								goto close_desktop_file;
-							}
+							fprintf(stderr, "%s: 'Name' key found but under incorrect header\n", file[n].path);
+							goto close_desktop_file;
 						}
 					}
 
-					name = names + 0;
+					name_idx = 0;
 				}
 				else
 				{
-					fprintf(stderr, "%s: 'Name' key found but under incorrect header\n", files[fn]);
+					fprintf(stderr, "%s: 'Name' key found but under incorrect header\n", file[n].path);
 					goto close_desktop_file;
 				}
 			}
-			else if (names_found > 1)
+			else
 			{
-				// FIXME
-				fprintf(stderr, "Not implemented\n");
-				goto close_desktop_file;
+				for(short i = 0; i < names_found; i++)
+				{
+					if(name_keys[i] > header)
+					{
+						for(short j = 0; j < oth_headers_found; j++)
+						{
+							if((oth_headers[j] > header) && (name_keys[i] > oth_headers[j]))
+								goto try_next_name;
+						}
+
+						if(name_idx != -1)
+						{
+							fprintf(stderr, "%s: Invalid syntax, found multiple `Name` keys ‎under the same header\n", file[n].path);
+							goto close_desktop_file;
+						}
+						else
+						{
+							name_idx = i;
+						}
+					}
+try_next_name:;
+				}
+
+				if(name_idx == -1)
+				{
+					fprintf(stderr, "%s: 'Name' keys found but under incorrect header\n", file[n].path);
+					goto close_desktop_file;
+				}
 			}
 		}
 
-		// Key found
-		for(name_len = 0; (fbuf[name->rm_eo + name_len] != '\n') && (fbuf[name->rm_eo + name_len] != '\0'); name_len++);
-		write(STDOUT_FILENO, fbuf + name->rm_eo, name_len);
+		// key found
+
+		for(name_len = 0; (names_start[name_idx][name_len] != '\n') && (names_start[name_idx][name_len] != '\0'); name_len++);
+
+		write(STDOUT_FILENO, names_start[name_idx], name_len);
 		write(STDOUT_FILENO, "\n", 1);
-		write(STDOUT_FILENO, files[fn], strlen(files[fn]));
+		write(STDOUT_FILENO, file[n].path, strlen(file[n].path));
 		write(STDOUT_FILENO, "\n", 1);
 
 close_desktop_file:
-		if(close(fd) == -1) perror(files[fn]);
+		if(close(fd) == -1) perror(file[n].path);
+		free(oth_headers);
+		free(name_keys);
+		free(names_start);
 next_file:;
 	}
 
