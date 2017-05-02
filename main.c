@@ -1,6 +1,8 @@
 /* Copyright 2017 Matteo Alessio Carrara <sw.matteoac@gmail.com> */
 
 // TODO Cache
+// TODO Read the .desktop standard
+// TODO Copy functions from i3-dmenu-desktop and j4-dmenu-desktop
 
 #define _DEFAULT_SOURCE
 #define _POSIX_C_SOURCE
@@ -14,6 +16,7 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -23,6 +26,8 @@
 struct desktop_file
 {
 		char path[PATH_MAX];
+		char *app_name;
+		short name_len;
 		off_t size;
 };
 
@@ -152,6 +157,14 @@ int main ()
 
 	unsigned name_len;
 
+	pid_t child_pid;
+	int child_status;
+	int child_stdin[2], child_stdout[2];
+
+	char *uc;
+	short uc_bufsiz, uc_len;
+	ssize_t uc_read;
+
 	// find paths where to search for .desktop files
 
 	ndirs = 1;
@@ -194,6 +207,8 @@ int main ()
 		}
 	}
 
+	// find .desktop files
+
 	for(short i = 0; i < ndirs; i++)
 	{
 		strcpy(testdir, searchdirs[i]);
@@ -201,13 +216,16 @@ int main ()
 		find_files(testdir, &file, &files_found);
 	}
 	file = realloc(file, sizeof(struct desktop_file) * files_found);
+	if(files_found == 0) die("No files found\n");
 
-	// print application names
+
+	// find application names
 
 	fbufsize = 20000;
 	fbuf = malloc(fbufsize + 1);
 	for(unsigned n = 0; n < files_found; n++)
 	{
+		file[n].app_name = NULL;
 		fd = open(file[n].path, O_RDONLY);
 		if (fd == -1)
 		{
@@ -420,10 +438,10 @@ try_next_name:;
 
 		for(name_len = 0; (names_start[name_idx][name_len] != '\n') && (names_start[name_idx][name_len] != '\0'); name_len++);
 
-		write(STDOUT_FILENO, names_start[name_idx], name_len);
-		write(STDOUT_FILENO, "\n", 1);
-		write(STDOUT_FILENO, file[n].path, strlen(file[n].path));
-		write(STDOUT_FILENO, "\n", 1);
+		file[n].name_len = name_len;
+		file[n].app_name = malloc(name_len + 1);
+		strncpy(file[n].app_name, names_start[name_idx], name_len);
+		file[n].app_name[name_len] = '\0';
 
 close_desktop_file:
 		if(close(fd) == -1) perror(file[n].path);
@@ -432,6 +450,91 @@ close_desktop_file:
 		free(names_start);
 next_file:;
 	}
+
+	// create the dmenu child process
+
+	pipe(child_stdin);
+	pipe(child_stdout);
+	child_pid = fork();
+
+	if(child_pid == -1)
+	{
+		perror("Cannot create dmenu process");
+		exit(EXIT_FAILURE);
+	}
+	else if(child_pid == 0) // child process code
+	{
+		close(child_stdin[1]);
+		close(child_stdout[0]);
+
+		dup2(child_stdin[0], 0);
+		dup2(child_stdout[1], 1);
+
+		if(execlp("dmenu", "dmenu", (char*)NULL) == -1)
+		{
+			perror("Cannot create dmenu process");
+			exit(EXIT_FAILURE);
+		}
+	}
+	else // parent process code
+	{
+		close(child_stdin[0]);
+		close(child_stdout[1]);
+
+		// send application names to dmenu
+		for(unsigned i = 0; i < files_found; i++)
+		{
+			if(file[i].app_name != NULL)
+			{
+				write(child_stdin[1], file[i].app_name, file[i].name_len);
+				write(child_stdin[1], "\n", 1);
+			}
+		}
+		close(child_stdin[1]);
+
+		if(waitpid(child_pid, &child_status, 0) == -1)
+		{
+			perror(NULL);
+			exit(EXIT_FAILURE);
+		}
+
+		if(WIFEXITED(child_status))
+			if(WEXITSTATUS(child_status) == EXIT_SUCCESS)
+				goto child_ok;
+
+		die("Error in child process\n");
+
+child_ok:;
+	}
+
+
+	// get the user's choice
+
+	uc_len = 0;
+	uc_bufsiz = 100;
+	uc = NULL;
+
+	do
+	{
+		uc = realloc(uc, uc_bufsiz + 1);
+		uc_read = read(child_stdout[0], uc, uc_bufsiz);
+		uc_len += uc_read;
+	} while(uc_read >= uc_bufsiz);
+	uc[uc_read - 1] = '\0'; // dmenu inserts a newline at the end
+
+	// find the command to execute
+	for(unsigned i = 0; i < files_found; i++)
+	{
+		if(file[i].app_name != NULL)
+		{
+			if(!strcmp(file[i].app_name, uc))
+			{
+				break;
+			}
+		}
+	}
+
+	// run the program
 
 	return 0;
 }
