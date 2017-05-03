@@ -548,7 +548,7 @@ next_file:;
 		dup2(child_stdin[0], 0);
 		dup2(child_stdout[1], 1);
 
-		if(execlp("dmenu", "dmenu", (char*)NULL) == -1)
+		if(execlp("dmenu", "dmenu", "-f", "-i", (char*)NULL) == -1)
 		{
 			perror("Cannot create dmenu process");
 			exit(EXIT_FAILURE);
