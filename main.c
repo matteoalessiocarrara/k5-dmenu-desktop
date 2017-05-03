@@ -28,6 +28,8 @@ struct desktop_file
 		char path[PATH_MAX];
 		char *app_name;
 		short name_len;
+		char *exec_name;
+		char **exec_args;
 		off_t size;
 };
 
@@ -226,6 +228,7 @@ int main ()
 	for(unsigned n = 0; n < files_found; n++)
 	{
 		file[n].app_name = NULL;
+
 		fd = open(file[n].path, O_RDONLY);
 		if (fd == -1)
 		{
@@ -434,7 +437,82 @@ try_next_name:;
 			}
 		}
 
-		// key found
+		// find the Exec key
+		// FIXME Check the header
+
+		for(unsigned i = 0; i < (file[n].size - strlen("Exec=")); i++)
+		{
+			if(fbuf[i] == 'E')
+			{
+				if(i > 0)
+					if(fbuf[i - 1] != '\n')
+						goto not_exec_key;
+
+				if(!strncmp(fbuf + i, "Exec", strlen("Exec")))
+				{
+					unsigned exec_start = i + strlen("Exec");
+					unsigned exec_len;
+
+					for(;;exec_start++)
+					{
+						if(fbuf[exec_start] != ' ')
+						{
+							if(fbuf[exec_start] == '=')
+							{
+								exec_start++;
+								break;
+							}
+							else
+								goto not_exec_key;
+						}
+					}
+
+					for(exec_len = 0; (fbuf[exec_start + exec_len] != '\n') && (fbuf[exec_start + exec_len] != '\0'); exec_len++);
+
+					char *tmp =  malloc(exec_len + 1);
+					strncpy(tmp, fbuf + exec_start, exec_len);
+					tmp[exec_len] = '\0';
+
+					char *tok = strtok(tmp, " ");
+					if(tok == NULL)
+					{
+						fprintf(stderr, "%s: Invalid exec value\n", file[n].path);
+						goto close_desktop_file;
+					}
+					else
+					{
+						file[n].exec_name = malloc(strlen(tok) + 1);
+						strcpy(file[n].exec_name, tok);
+					}
+
+					file[n].exec_args = NULL;
+					short argn = 0;
+
+					argn++;
+					file[n].exec_args = realloc(file[n].exec_args, sizeof(char*) * argn);
+					file[n].exec_args[argn - 1] = malloc(strlen(file[n].exec_name) + 1);
+					strcpy(file[n].exec_args[argn - 1], file[n].exec_name);
+
+					while((tok = strtok(NULL, " ")) != NULL)
+					{
+						if(tok[0] != '%')
+						{
+							argn++;
+							file[n].exec_args = realloc(file[n].exec_args, sizeof(char*) * argn);
+							file[n].exec_args[argn - 1] = malloc(strlen(tok) + 1);
+							strcpy(file[n].exec_args[argn - 1], tok);
+						}
+					}
+
+					argn++;
+					file[n].exec_args = realloc(file[n].exec_args, sizeof(char*) * argn);
+					file[n].exec_args[argn - 1] = NULL;
+				}
+			}
+not_exec_key:;
+		}
+
+		// keys found
 
 		for(name_len = 0; (names_start[name_idx][name_len] != '\n') && (names_start[name_idx][name_len] != '\0'); name_len++);
 
@@ -522,19 +600,34 @@ child_ok:;
 	} while(uc_read >= uc_bufsiz);
 	uc[uc_read - 1] = '\0'; // dmenu inserts a newline at the end
 
-	// find the command to execute
-	for(unsigned i = 0; i < files_found; i++)
-	{
-		if(file[i].app_name != NULL)
-		{
-			if(!strcmp(file[i].app_name, uc))
-			{
-				break;
-			}
-		}
-	}
 
 	// run the program
+	child_pid = fork();
 
-	return 0;
+	if(child_pid == -1)
+	{
+		// FIXME add the name of process
+		die("Cannot start child process: %s\n", strerror(errno));
+	}
+	else if(child_pid == 0) // child process code
+	{
+		for(unsigned i = 0; i < files_found; i++)
+		{
+			if(file[i].app_name != NULL)
+				if(!strcmp(file[i].app_name, uc))
+				{
+					if(execvp(file[i].exec_name, file[i].exec_args) == -1)
+					{
+						printf("'%s' '%s'", file[i].exec_name, file[i].exec_args);
+						die("Cannot start child process: %s\n", strerror(errno));
+					}
+				}
+		}
+
+	}
+	else // parent process code
+	{
+		return 0;
+	}
+
 }
