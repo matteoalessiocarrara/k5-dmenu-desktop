@@ -548,7 +548,12 @@ next_file:;
 		dup2(child_stdin[0], 0);
 		dup2(child_stdout[1], 1);
 
-		if(execlp("dmenu", "dmenu", "-f", "-i", (char*)NULL) == -1)
+#ifndef BENCHMARK
+#define EXEC_DMENU execlp("dmenu", "dmenu", "-f", "-i", (char*)NULL)
+#else
+#define EXEC_DMENU execlp("echo", "echo", "TestDmenu", (char*)NULL)
+#endif
+		if(EXEC_DMENU == -1)
 		{
 			perror("Cannot create dmenu process");
 			exit(EXIT_FAILURE);
@@ -579,7 +584,7 @@ next_file:;
 				}
 			}
 		}
-
+#ifndef BENCHMARK
 		// send application names to dmenu
 		for(unsigned i = 0; i < files_found; i++)
 		{
@@ -589,6 +594,7 @@ next_file:;
 				write(child_stdin[1], "\n", 1);
 			}
 		}
+#endif
 		close(child_stdin[1]);
 
 		if(waitpid(child_pid, &child_status, 0) == -1)
@@ -635,16 +641,17 @@ child_ok:;
 		for(unsigned i = 0; i < files_found; i++)
 		{
 			if(file[i].app_name != NULL)
+			{
 				if(!strcmp(file[i].app_name, uc))
 				{
 					if(execvp(file[i].exec_name, file[i].exec_args) == -1)
 					{
-						printf("'%s' '%s'", file[i].exec_name, file[i].exec_args);
 						die("Cannot start child process: %s\n", strerror(errno));
 					}
 				}
+			}
 		}
-
+		die("No application is called '%s'\n", uc);
 	}
 	else // parent process code
 	{
