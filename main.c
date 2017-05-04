@@ -574,7 +574,7 @@ next_file:;
 				{
 					if(file[j].app_name != NULL)
 					{
-						if(file[i].app_name[0] > file[j].app_name[0])
+						if(strcmp(file[i].app_name, file[j].app_name) > 0)
 						{
 							struct desktop_file tmp = file[i];
 							file[i] = file[j];
