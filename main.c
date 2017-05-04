@@ -559,6 +559,27 @@ next_file:;
 		close(child_stdin[0]);
 		close(child_stdout[1]);
 
+		// sort application by name
+		// TODO add option to disable
+		for(unsigned i = 0; i < files_found - 1; i++)
+		{
+			if (file[i].app_name != NULL)
+			{
+				for(unsigned j = i + 1; j < files_found; j++)
+				{
+					if(file[j].app_name != NULL)
+					{
+						if(file[i].app_name[0] > file[j].app_name[0])
+						{
+							struct desktop_file tmp = file[i];
+							file[i] = file[j];
+							file[j] = tmp;
+						}
+					}
+				}
+			}
+		}
+
 		// send application names to dmenu
 		for(unsigned i = 0; i < files_found; i++)
 		{
