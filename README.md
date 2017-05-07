@@ -1,5 +1,5 @@
 # k5-dmenu-desktop
-### A faster application launcher
+### Fast as the mind application launcher
 
 In my opinion, a menu should be as fast as possible, since when it opens you
 already have in mind which application you will want to run. A menu is just an
@@ -10,12 +10,11 @@ loves Unix and C).
 
 It searches for installed applications (which follow the
 [freedesktop.org standard](https://standards.freedesktop.org/desktop-entry-spec/latest/)),
-sends their names on stdin to an executable (usually dmenu), and reads the user's
-choice from its stdout.
+sends their names on stdin to an executable (usually [dmenu](http://tools.suckless.org/dmenu/)),
+and reads the user's choice from its stdout.
 
-It should work on all systems with a C99 compiler and an environment conforming
-to POSIX/freedesktop standards. [Dmenu](http://tools.suckless.org/dmenu/) or an
-equivalent program is also required.
+It should work on all systems with a C99 compiler and a POSIX/freedesktop conforming
+environment. Dmenu or an equivalent program is also required.
 
 Specifically, I thought it as an alternative to the painfully slow menu of
 [i3wm](https://i3wm.org/) (which is written in perl), and the faster
