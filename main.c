@@ -134,8 +134,9 @@ ls_start:
 	free(efullpath);
 }
 
-int main ()
+int main (int argc, char **argv)
 {
+	char **dmenu_argv;
 	char **searchdirs, *xdg_data_dirs, *home;
 	short ndirs;
 
@@ -166,6 +167,91 @@ int main ()
 	char *uc;
 	short uc_bufsiz, uc_len;
 	ssize_t uc_read;
+
+	// parse command line
+
+	dmenu_argv = malloc(sizeof(char*) * 3);
+	dmenu_argv[0] = "dmenu";
+	dmenu_argv[1] = "-i";
+	dmenu_argv[2] = NULL;
+
+	if(argc > 1)
+	{
+		for(short i = 1; i < argc; i++)
+		{
+			if(argv[i][0] == '-')
+			{
+				if(!strcmp(argv[i], "--help"))
+				{
+					printf("Usage: k5-dmenu-desktop [--help] [--dmenu \"dmenu -i\"]\n");
+					exit(EXIT_SUCCESS);
+				}
+				else if(!strcmp(argv[i], "--dmenu"))
+				{
+					if((i + 1) >= argc)
+					{
+						die("Missing parameter for '--dmenu'\n");
+					}
+					else
+					{
+						char *tmp;
+						bool in_word;
+						short args;
+
+						i++;
+
+						tmp = malloc(strlen(argv[i]) + 1);
+						strcpy(tmp, argv[i]);
+
+						in_word = false;
+						args = 0;
+						for(short j = 0; tmp[j] != '\0'; j++)
+						{
+							if(tmp[j] != ' ')
+							{
+								if(!in_word)
+								{
+									in_word = true;
+									args++;
+									dmenu_argv = realloc(dmenu_argv, sizeof(char*) * args);
+									dmenu_argv[args - 1] = tmp + j;
+								}
+							}
+							else
+							{
+								if(in_word)
+								{
+									in_word = false;
+									tmp[j] = '\0';
+								}
+							}
+						}
+
+						if(args < 1)
+						{
+							die("An empty string has been used as an argument for --dmenu\n");
+						}
+						else
+						{
+							args++;
+							dmenu_argv = realloc(dmenu_argv, sizeof(char*) * args);
+							dmenu_argv[args - 1] = NULL;
+						}
+					}
+				}
+				else
+				{
+					goto invalid_cmdline;
+				}
+			}
+			else
+			{
+invalid_cmdline:;
+				die("Invalid argument: '%s'. Use '--help' for help.\n", argv[i]);
+			}
+		}
+	}
+
 
 	// find paths where to search for .desktop files
 
@@ -548,12 +634,7 @@ next_file:;
 		dup2(child_stdin[0], 0);
 		dup2(child_stdout[1], 1);
 
-#ifndef BENCHMARK
-#define EXEC_DMENU execlp("dmenu", "dmenu", "-f", "-i", (char*)NULL)
-#else
-#define EXEC_DMENU execlp("echo", "echo", "TestDmenu", (char*)NULL)
-#endif
-		if(EXEC_DMENU == -1)
+		if(execvp(dmenu_argv[0], dmenu_argv) == -1)
 		{
 			perror("Cannot create dmenu process");
 			exit(EXIT_FAILURE);
@@ -584,18 +665,23 @@ next_file:;
 				}
 			}
 		}
-#ifndef BENCHMARK
+
 		// send application names to dmenu
+		// since the executable can be chosen by the user, it may not read anything
+		// from stdin; thus generating an error
+		signal(SIGPIPE, SIG_IGN);
 		for(unsigned i = 0; i < files_found; i++)
 		{
 			if(file[i].app_name != NULL)
 			{
-				write(child_stdin[1], file[i].app_name, file[i].name_len);
-				write(child_stdin[1], "\n", 1);
+				if(write(child_stdin[1], file[i].app_name, file[i].name_len) == -1)
+					break;
+				if(write(child_stdin[1], "\n", 1) == -1)
+					break;
 			}
 		}
-#endif
 		close(child_stdin[1]);
+		signal(SIGPIPE, SIG_DFL);
 
 		if(waitpid(child_pid, &child_status, 0) == -1)
 		{
